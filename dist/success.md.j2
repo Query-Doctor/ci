@@ -1,0 +1,120 @@
+{% if gateSummary %}
+### <picture><img src="{{ brandMark }}" width="18" height="20" align="absmiddle" alt=""></picture> Query Doctor — {% if gateSummary.failing > 0 %}{{ gateSummary.failing }} failing and {% endif %}{{ gateSummary.successful }} successful check{{ "" if gateSummary.successful == 1 else "s" }}
+
+{% for g in gates %}
+<picture><img src="{{ gateIconBase }}/{{ "fail" if g.conclusion == "failure" else ("warn" if g.conclusion == "neutral" else "pass") }}.svg" width="14" height="16" align="absmiddle" alt=""></picture> &nbsp;**{{ g.label }}** — {{ g.found }}
+{% if g.condition == "new-query-index" and g.fired %}
+{% for r in displayRecommendations %}
+{% set link = queryLinks[r.fingerprint] %}
+{% if r.site %}{% if link %}[`{{ r.site.name }}`]({{ link }}){% else %}`{{ r.site.name }}`{% endif %}{% else %}{% if link %}[<code>{{ r.queryPreview }}</code>]({{ link }}){% else %}<code>{{ r.queryPreview }}</code>{% endif %}{% endif %}
+
+<sub>{% if r.site and r.site.file %}{{ r.site.file }} · {% endif %}plans at {{ formatCost(r.baseCost) }}, or <b>{{ formatCost(r.optimizedCost) }}</b> with {{ "this index" if r.proposedIndexes.length == 1 else "these indexes" }} ({{ (((r.baseCost - r.optimizedCost) / r.baseCost) * 100) | round(0) }}% improvement)</sub>
+
+```sql
+{% for idx in r.proposedIndexes %}CREATE INDEX ON {{ idx }};
+{% endfor %}```
+{% endfor %}
+{% endif %}
+{% if g.condition == "regression-beyond-threshold" and g.fired %}
+{% if tableGrowth and tableGrowth.length > 0 %}
+<sub>Bigger tables since the baseline: {% for gr in tableGrowth.slice(0, 3) %}<code>{{ gr.table }}</code> +{{ gr.percent }}% ({{ formatCost(gr.before) }} → {{ formatCost(gr.after) }} rows){% if not loop.last %}, {% endif %}{% endfor %}{% if tableGrowth.length > 3 %}, and {{ tableGrowth.length - 3 }} more{% endif %}. A plan costs more against more rows, whatever the diff changed.</sub>
+
+{% endif %}
+{% for q in displayRegressed %}
+{% set link = queryLinks[q.hash] %}
+{% if q.site %}{% if link %}[`{{ q.site.name }}`]({{ link }}){% else %}`{{ q.site.name }}`{% endif %}{% else %}{% if link %}[<code>{{ q.queryPreview }}</code>]({{ link }}){% else %}<code>{{ q.queryPreview }}</code>{% endif %}{% endif %}
+
+<sub>{% if q.site and q.site.file %}{{ q.site.file }} · {% endif %}{{ formatCost(q.previousCost) }} on the baseline, {{ formatCost(q.currentCost) }} here (+{{ q.regressionPercentage | round(0) }}%)</sub>
+
+{% endfor %}
+{% endif %}
+{% if g.condition == "schema-drift" and g.fired and schemaChange.hasChanges %}
+{% for group in schemaChange.groups %}
+{% for entry in group.entries %}
+<sub>{{ schemaChangeLabel(entry) }}</sub>
+{% endfor %}
+{% endfor %}
+
+{% endif %}
+{% endfor %}
+
+---
+{% else %}
+### Query Doctor Analysis
+{% endif %}
+{% if hasComparison %}
+{% elif comparisonUnavailable %}
+Comparison temporarily unavailable.
+
+> **Couldn't load the baseline for `{{ comparisonBranch }}` this run**, so the comparison was skipped. This is temporary and doesn't mean the baseline is missing — re-run the check to retry.
+{% else %}
+No baseline found to compare against.
+
+{% if comparisonBranch %}
+> **No baseline on `{{ comparisonBranch }}`.** The analyzer records a baseline when it runs on a push to `{{ comparisonBranch }}`, and compares later runs against it. If this run is the first, the next one has something to compare against. If the workflow has no `push` trigger for `{{ comparisonBranch }}`, add one: see the [CI integration guide](https://docs.querydoctor.com/guides/ci-integration/#workflow-trigger).
+{% else %}
+> **No comparison branch is set**, so nothing was compared. Set one in the project's CI settings, then push to it once so the analyzer records a baseline. See the [CI integration guide](https://docs.querydoctor.com/guides/ci-integration/#workflow-trigger).
+{% endif %}
+{% endif %}
+{% if hasComparison and runMetadata and runMetadata.baseline and runMetadata.baseline.unset %}
+
+> [!WARNING]
+> **No comparison branch configured** — regressions and new queries are compared against `{{ runMetadata.baseline.resolvedBranch }}`{% if runMetadata.baseline.headVsHead %}, this PR's own branch, so the counts above can read "0 new" on a PR full of new queries{% else %}, a fallback that can diverge from the dashboard and breaks on non-PR runs{% endif %}. Set a comparison branch (typically your default branch) in the project's CI settings — or inspect it with <code>{{ runMetadata.baseline.mcpCall }}</code>.
+{% endif %}
+
+{% if ingestError %}
+> [!CAUTION]
+{% if ingestError.kind == "auth" %}
+> **Query Doctor couldn't record this run — authentication failed{% if ingestError.status %} (HTTP {{ ingestError.status }}){% endif %}.** The project token is missing or invalid, so nothing was saved to the dashboard. Set a valid `TOKEN` in your workflow.
+{% elif ingestError.kind == "transient" %}
+> **Query Doctor couldn't record this run.** The API was unreachable{% if ingestError.status %} (HTTP {{ ingestError.status }}){% endif %}, so it wasn't saved this time. This is usually temporary — re-run the check to retry.
+{% elif ingestError.kind == "too_large" %}
+> **Query Doctor couldn't record this run.** The submission was too large{% if ingestError.status %} (HTTP {{ ingestError.status }}){% endif %} for the API to accept, so it wasn't saved to the dashboard and the results below may be incomplete. Re-running won't help — this is a size limit on our side.
+{% else %}
+> **Query Doctor couldn't record this run.** The API rejected the submission{% if ingestError.status %} (HTTP {{ ingestError.status }}){% endif %}, so it wasn't saved to the dashboard and the results below may be incomplete. This usually means the analyzer and Query Doctor are out of sync — re-running won't help; if it persists, it's a bug on our side.
+{% endif %}
+{% if ingestError.message %}
+<details><summary>Details</summary>
+
+```
+{{ ingestError.message }}
+```
+
+</details>
+{% endif %}
+
+{% endif %}
+{% if testPresenceVerdict %}
+> [!{{ "CAUTION" if testPresenceConclusion == "failure" else "NOTE" }}]
+> **Could not verify — this PR changes queries with no related data-layer test.**
+> {{ testPresenceVerdict.reason }}
+>
+> **Next step:** {{ testPresenceVerdict.nextStep }}
+>
+> Changed data-access files with no related data-layer test:
+{% for f in testPresenceVerdict.dataAccessFiles %}
+{% if f.evidence %}
+> - `{{ f.path }}` — matched `{{ f.evidence.rule }}` on line {{ f.evidence.line }}: `{{ f.evidence.matched }}`
+{% else %}
+> - `{{ f.path }}`
+{% endif %}
+{% endfor %}
+>
+> _{{ testPresenceVerdict.triageHint }}_
+
+{% endif %}
+{% if modeledTablesNotice %}
+> [!NOTE]
+> **{{ modeledTablesNotice.count }} table(s) in your schema aren't covered by the statistics you loaded**, so their costs are modeled, not verified against real data: {{ modeledTablesNotice.list }}. A query touching one isn't a clean pass.
+
+{% endif %}
+{% if statisticsMode.kind == "fromAssumption" and not gateSummary %}
+<sub>Using assumed statistics ({{ statisticsMode.reltuples }} rows/table). For better results, <a href="https://docs.querydoctor.com/reference/statistics">sync production stats</a>.</sub>
+{% endif %}
+{% if runMetadata %}
+<sub>{% if gateSummary %}More details via MCP → <code>{{ runMetadata.footer | replace("More detail → ", "") }}</code>{% else %}{{ runMetadata.footer }}{% endif %}{% if runUrl %} · <a href="{{ runUrl }}">view run</a>{% endif %}{% if runMetadata.docsUrl %} · <a href="{{ runMetadata.docsUrl }}">docs</a>{% endif %}</sub>
+{% if gateSummary %}
+<sub>{{ queryStats.analyzed | default('?') }} queries read against <code>{{ comparisonBranch }}</code>{% if statisticsMode.kind == 'fromStatisticsExport' %} on this project's exported production statistics.</sub>{% elif statisticsMode.kind == 'fromAssumption' %} on assumed statistics of {{ formatCost(statisticsMode.reltuples) }} rows per table. <a href="https://docs.querydoctor.com/reference/statistics">Sync production stats</a> for costs measured against your real data.</sub>{% else %}.</sub>{% endif %}
+
+{% endif %}
+{% endif %}

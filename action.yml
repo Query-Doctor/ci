@@ -1,0 +1,131 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-action.json
+#
+# query-doctor/ci (ADR 0039). This folder is the source; publish-ci-action.yaml
+# copies it to the public Query-Doctor/ci repository on an action release.
+# Edit it here, never there.
+#
+# It resolves, then runs. The platform names the Collector that speaks its
+# ingest protocol (`GET /ingest/collector`), and this pulls and runs exactly
+# that, so no workflow ever picks a Collector its platform cannot read. That is
+# also why this is a composite action rather than a container action: a
+# container action's image is fixed when the action is published.
+#
+# The semver of this file covers its inputs, its outputs, its exit code and the
+# shape of the `/ingest/collector` response, and nothing else. A protocol bump
+# is not a change here.
+
+name: "Query Doctor"
+description: "Send the SQL your tests ran to Query Doctor and report plan regressions on the pull request"
+
+branding:
+  icon: "database"
+  color: "blue"
+
+inputs:
+  token:
+    description: "Project token from your Query Doctor instance. Store it as the repository secret QUERYDOCTOR_TOKEN."
+    required: true
+  endpoint:
+    description: "The Query Doctor instance this run reports to. Your instance's public address if you self-host."
+    required: false
+    default: "https://cloud.querydoctor.com"
+  database-url:
+    description: "Connection string of the database your tests ran against, as the runner reaches it (localhost for a service container with a published port)."
+    required: true
+
+outputs:
+  verdict:
+    description: "success, neutral or failure as the platform concluded, or error when it gave no conclusion."
+    value: ${{ steps.run.outputs.verdict }}
+  run-url:
+    description: "The run's page on the Query Doctor instance."
+    value: ${{ steps.run.outputs.run-url }}
+
+runs:
+  using: "composite"
+  steps:
+    # Every failure before the Collector starts fails the step with its own
+    # sentence. A check that verified nothing has not passed (#4148).
+    - name: Ask the platform which Collector to run
+      id: resolve
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        ENDPOINT: ${{ inputs.endpoint }}
+      run: |
+        endpoint="${ENDPOINT%/}"
+        body="$RUNNER_TEMP/query-doctor-collector.json"
+        if ! status=$(curl --silent --show-error --max-time 30 \
+          --output "$body" --write-out '%{http_code}' \
+          --header "Authorization: Bearer $TOKEN" \
+          "$endpoint/ingest/collector"); then
+          echo "::error title=Query Doctor::Could not reach $endpoint to ask which Collector to run. Check the endpoint input; re-run if it was a network blip."
+          exit 1
+        fi
+        case "$status" in
+          200) ;;
+          404)
+            echo "::error title=Query Doctor::The platform at $endpoint does not name a Collector, so it predates query-doctor/ci@v1. Upgrade the platform."
+            exit 1 ;;
+          401|403)
+            echo "::error title=Query Doctor::$endpoint rejected the token. Check the QUERYDOCTOR_TOKEN secret."
+            exit 1 ;;
+          *)
+            echo "::error title=Query Doctor::$endpoint answered HTTP $status when asked which Collector to run. Re-run the job; if it persists, the platform is unwell."
+            exit 1 ;;
+        esac
+        image=$(jq -er '.image | select(type == "string" and length > 0)' "$body") || {
+          echo "::error title=Query Doctor::$endpoint answered without naming a Collector image. The platform is newer or older than this action can read."
+          exit 1
+        }
+        protocol=$(jq -r '.protocol' "$body")
+        echo "Platform at $endpoint speaks ingest protocol $protocol and names $image"
+        echo "image=$image" >> "$GITHUB_OUTPUT"
+
+    - name: Pull the Collector
+      shell: bash
+      env:
+        IMAGE: ${{ steps.resolve.outputs.image }}
+        ENDPOINT: ${{ inputs.endpoint }}
+      run: |
+        if ! docker pull --quiet "$IMAGE"; then
+          echo "::error title=Query Doctor::Could not pull $IMAGE, the Collector ${ENDPOINT%/} names. A platform behind a mirror sets COLLECTOR_IMAGE to an image this runner can pull."
+          exit 1
+        fi
+
+    # On the host network, so a Postgres that trusts only 127.0.0.1 is reached
+    # at the address the tests used. The step's exit code is the verdict.
+    - name: Run the Collector
+      id: run
+      shell: bash
+      env:
+        IMAGE: ${{ steps.resolve.outputs.image }}
+        TOKEN: ${{ inputs.token }}
+        SITE_API_ENDPOINT: ${{ inputs.endpoint }}
+        SOURCE_DATABASE_URL: ${{ inputs.database-url }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        context=()
+        for name in $(compgen -e | grep '^GITHUB_'); do
+          context+=(--env "$name")
+        done
+        # As the runner's user, so the Collector can write the files the runner
+        # owns and hands to this step.
+        #
+        # Every GITHUB_* variable is forwarded above, so a file that is named
+        # and not mounted is a path that does not exist in here. Mount each one
+        # the Collector opens for writing: GITHUB_OUTPUT for the step's outputs,
+        # GITHUB_STEP_SUMMARY for the report on the job's Summary tab (#4477).
+        docker run --rm --network host \
+          --user "$(id -u):$(id -g)" \
+          --env HOME=/tmp \
+          --volume "$GITHUB_EVENT_PATH:$GITHUB_EVENT_PATH:ro" \
+          --volume "$GITHUB_OUTPUT:$GITHUB_OUTPUT" \
+          --volume "$GITHUB_STEP_SUMMARY:$GITHUB_STEP_SUMMARY" \
+          --env CI=true \
+          --env COLLECTOR_NAMED_BY_PLATFORM=true \
+          --env TOKEN \
+          --env SITE_API_ENDPOINT \
+          --env SOURCE_DATABASE_URL \
+          "${context[@]}" \
+          "$IMAGE"

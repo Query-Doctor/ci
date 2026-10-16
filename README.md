@@ -1,52 +1,37 @@
 # Query Doctor CI
 
-Run this action after your test suite. It collects the SQL your tests executed, replays it against a real Postgres planner, and reports regressions, missing indexes, and schema problems on the pull request.
+Run this action after your test suite. It sends the SQL your tests ran to Query Doctor, which reports regressions, missing indexes and schema changes on the pull request. The step fails when the check does.
+
+The same report appears on the job's Summary tab. That is the only place it appears on a push run, which has no pull request to comment on.
 
 ## Usage
 
-Your job runs its tests against a Postgres instance with a supported query source enabled (`pg_stat_statements` or `auto_explain`), then hands over to the action:
+Run your tests against a Postgres with `pg_stat_statements` enabled, then:
 
 ```yaml
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      # ... start postgres with pg_stat_statements or auto_explain,
-      #     run migrations and seeds, run your tests ...
-      - name: Run Query Doctor
-        uses: query-doctor/ci@v1
-        with:
-          postgres-version: "18"
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          TOKEN: ${{ secrets.QUERY_DOCTOR_TOKEN }}
-          SOURCE_DATABASE_URL: postgres://postgres:postgres@localhost/myapp_test
-          LOG_PATH: /var/log/postgresql/postgres.log
+- uses: query-doctor/ci@v1
+  with:
+    token: ${{ secrets.QUERYDOCTOR_TOKEN }}
+    database-url: postgres://postgres:postgres@localhost:5432/myapp_test
 ```
 
-Trigger the workflow on `pull_request` and on `push` to your main branch: PR runs are compared against the baseline the main-branch runs establish.
-
-The action starts its own analysis Postgres (`ghcr.io/query-doctor/postgres`, a fork instrumented for planner work), copies the schema from `SOURCE_DATABASE_URL` into it, and does all analysis there. Your database is only read.
+Trigger the workflow on `pull_request` and on `push` to your main branch. For a complete workflow fitted to your repo, use the `setup_ci` MCP tool or copy the one on your project's CI page.
 
 ## Inputs
 
-| Input              | Required | Default | Description                                        |
-| ------------------ | -------- | ------- | -------------------------------------------------- |
-| `postgres-version` | yes      | `18`    | `14`, `17`, or `18`. Match your production major.  |
+| Input          | Required | Default                         | Description                                                    |
+| -------------- | -------- | ------------------------------- | -------------------------------------------------------------- |
+| `token`        | yes      |                                 | Project token, stored as the secret `QUERYDOCTOR_TOKEN`.       |
+| `database-url` | yes      |                                 | The database your tests ran against, as the runner reaches it. |
+| `endpoint`     | no       | `https://cloud.querydoctor.com` | Your instance's address if you self-host.                      |
 
-## Environment variables
+## Outputs
 
-| Variable              | Required | Description                                                                  |
-| --------------------- | -------- | ---------------------------------------------------------------------------- |
-| `TOKEN`               | yes      | Project token from [app.querydoctor.com](https://app.querydoctor.com). Store it as a repository secret. |
-| `SOURCE_DATABASE_URL` | yes      | Connection string of the database your tests ran against.                    |
-| `GITHUB_TOKEN`        | yes      | `${{ github.token }}`. Used to comment on the pull request.                  |
-| `LOG_PATH`            | no       | Path to the postgres log file, when `auto_explain` is the query source.      |
-| `SITE_API_ENDPOINT`   | no       | Defaults to `https://api.querydoctor.com`. Set it for self-hosted deployments. |
+| Output    | Description                                                               |
+| --------- | ------------------------------------------------------------------------- |
+| `verdict` | `success`, `neutral`, `failure`, or `error` when no conclusion came back. |
+| `run-url` | The run's page on your Query Doctor instance.                             |
 
-## About this repository
+The action asks your instance which Collector to run, so `@v1` keeps working whichever version your instance runs.
 
-`dist/` is the compiled collector, synced from the private Query-Doctor/Site monorepo by its Publish CI Action workflow. There is no buildable source here; changes arrive as dist syncs, and releases are tags cut from `main`.
+This repository is published from Query-Doctor/Site. Report issues there.

@@ -52,35 +52,8 @@ runs:
       env:
         TOKEN: ${{ inputs.token }}
         ENDPOINT: ${{ inputs.endpoint }}
-      run: |
-        endpoint="${ENDPOINT%/}"
-        body="$RUNNER_TEMP/query-doctor-collector.json"
-        if ! status=$(curl --silent --show-error --max-time 30 \
-          --output "$body" --write-out '%{http_code}' \
-          --header "Authorization: Bearer $TOKEN" \
-          "$endpoint/ingest/collector"); then
-          echo "::error title=Query Doctor::Could not reach $endpoint to ask which Collector to run. Check the endpoint input; re-run if it was a network blip."
-          exit 1
-        fi
-        case "$status" in
-          200) ;;
-          404)
-            echo "::error title=Query Doctor::The platform at $endpoint does not name a Collector, so it predates query-doctor/ci@v1. Upgrade the platform."
-            exit 1 ;;
-          401|403)
-            echo "::error title=Query Doctor::$endpoint rejected the token. Check the QUERYDOCTOR_TOKEN secret."
-            exit 1 ;;
-          *)
-            echo "::error title=Query Doctor::$endpoint answered HTTP $status when asked which Collector to run. Re-run the job; if it persists, the platform is unwell."
-            exit 1 ;;
-        esac
-        image=$(jq -er '.image | select(type == "string" and length > 0)' "$body") || {
-          echo "::error title=Query Doctor::$endpoint answered without naming a Collector image. The platform is newer or older than this action can read."
-          exit 1
-        }
-        protocol=$(jq -r '.protocol' "$body")
-        echo "Platform at $endpoint speaks ingest protocol $protocol and names $image"
-        echo "image=$image" >> "$GITHUB_OUTPUT"
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/resolve-collector.sh"
 
     - name: Pull the Collector
       shell: bash
@@ -104,6 +77,11 @@ runs:
         SITE_API_ENDPOINT: ${{ inputs.endpoint }}
         SOURCE_DATABASE_URL: ${{ inputs.database-url }}
         GITHUB_TOKEN: ${{ github.token }}
+        # No runner variable names this job's id, and the platform needs it to
+        # rerun the job when someone approves a schema change (ADR 0045).
+        # GitHub Enterprise Server has no check run id there; the expression is
+        # then empty, which the Collector reads as unset.
+        COLLECTOR_JOB_ID: ${{ job.check_run_id }}
       run: |
         context=()
         for name in $(compgen -e | grep '^GITHUB_'); do
@@ -127,5 +105,6 @@ runs:
           --env TOKEN \
           --env SITE_API_ENDPOINT \
           --env SOURCE_DATABASE_URL \
+          --env COLLECTOR_JOB_ID \
           "${context[@]}" \
           "$IMAGE"

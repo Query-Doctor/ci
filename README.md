@@ -35,3 +35,7 @@ Trigger the workflow on `pull_request` and on `push` to your main branch. For a 
 The action asks your instance which Collector to run, so `@v1` keeps working whichever version your instance runs.
 
 This repository is published from Query-Doctor/Site. Report issues there.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

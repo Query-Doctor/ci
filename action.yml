@@ -32,6 +32,10 @@ inputs:
   database-url:
     description: "Connection string of the database your tests ran against, as the runner reaches it (localhost for a service container with a published port)."
     required: true
+  log-path:
+    description: "Path, on the runner, of a Postgres log written by auto_explain in JSON. The Collector then reads the queries from it, with their literal values, instead of from pg_stat_statements."
+    required: false
+    default: ""
 
 outputs:
   verdict:
@@ -82,7 +86,19 @@ runs:
         # GitHub Enterprise Server has no check run id there; the expression is
         # then empty, which the Collector reads as unset.
         COLLECTOR_JOB_ID: ${{ job.check_run_id }}
+        LOG_PATH: ${{ inputs.log-path }}
       run: |
+        # pg_stat_statements reduces every literal to $n, so a query's own
+        # values, such as the keys it removes from a document, reach the
+        # Collector only through an auto_explain log.
+        log=()
+        if [ -n "$LOG_PATH" ]; then
+          if [ ! -r "$LOG_PATH" ]; then
+            echo "::error title=Query Doctor::log-path names $LOG_PATH, which this runner cannot read."
+            exit 1
+          fi
+          log=(--volume "$LOG_PATH:/var/log/qd/postgres.log:ro" --env LOG_PATH=/var/log/qd/postgres.log)
+        fi
         context=()
         for name in $(compgen -e | grep '^GITHUB_'); do
           context+=(--env "$name")
@@ -106,5 +122,6 @@ runs:
           --env SITE_API_ENDPOINT \
           --env SOURCE_DATABASE_URL \
           --env COLLECTOR_JOB_ID \
+          "${log[@]}" \
           "${context[@]}" \
           "$IMAGE"
